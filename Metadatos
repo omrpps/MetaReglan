@@ -1,0 +1,363 @@
+import os
+import PyPDF2
+from PIL import Image, ExifTags
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from jinja2 import Environment, BaseLoader
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+import concurrent.futures
+import logging
+from typing import Dict, List, Any
+from datetime import datetime
+import webbrowser
+from mutagen import File as MutagenFile
+from pymediainfo import MediaInfo
+
+# Configuración de logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def parse_pdf_date(date_str: str) -> str:
+    """Parses a PDF date string to a human-readable format."""
+    try:
+        if isinstance(date_str, datetime):
+            return date_str.strftime("%Y-%m-%d %H:%M:%S")
+        if date_str.startswith("D:"):
+            date_str = date_str[2:]
+        date = datetime.strptime(date_str, "%Y%m%d%H%M%S%z")
+        return date.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return date_str
+
+def extract_pdf_metadata(pdf_file_path: str) -> Dict[str, Any]:
+    """Extrae metadatos de un archivo PDF."""
+    try:
+        with open(pdf_file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            if reader.is_encrypted:
+                return {'Error': 'El archivo PDF está encriptado.'}
+            info = reader.metadata
+            metadata = {
+                'Autor': info.author,
+                'Creador': info.creator,
+                'Productor': info.producer,
+                'Título': info.title,
+                'Asunto': info.subject,
+                'Fecha de creación': parse_pdf_date(info.creation_date) if info.creation_date else None,
+                'Modificado': parse_pdf_date(info.modification_date) if info.modification_date else None
+            }
+            return {k: v for k, v in metadata.items() if v is not None}
+    except Exception as e:
+        logging.error(f"Error al procesar el archivo PDF {pdf_file_path}: {str(e)}")
+        return {'Error': str(e)}
+
+def extract_gps_info(exif_data):
+    """Extrae e interpreta la información GPS de los datos EXIF."""
+    if 'GPSInfo' not in exif_data:
+        return {}
+
+    gps_info = exif_data['GPSInfo']
+    gps_data = {}
+    
+    for key in gps_info.keys():
+        decode = ExifTags.GPSTAGS.get(key, key)
+        gps_data[decode] = gps_info[key]
+    
+    def convert_to_degrees(value):
+        d = value[0][0] / value[0][1]
+        m = value[1][0] / value[1][1]
+        s = value[2][0] / value[2][1]
+        return d + (m / 60.0) + (s / 360.0)
+    
+    latitude = gps_data.get('GPSLatitude')
+    latitude_ref = gps_data.get('GPSLatitudeRef')
+    longitude = gps_data.get('GPSLongitude')
+    longitude_ref = gps_data.get('GPSLongitudeRef')
+    
+    if latitude and latitude_ref and longitude and longitude_ref:
+        lat = convert_to_degrees(latitude)
+        if latitude_ref != "N":
+            lat = -lat
+
+        lon = convert_to_degrees(longitude)
+        if longitude_ref != "E":
+            lon = -lon
+
+        gps_data['Latitud'] = lat
+        gps_data['Longitud'] = lon
+    
+    return gps_data
+
+def extract_image_metadata(image_file_path: str) -> Dict[str, Any]:
+    """Extrae metadatos de un archivo de imagen."""
+    try:
+        with Image.open(image_file_path) as image:
+            info = image._getexif()
+            metadata = {}
+            if info:
+                for tag_id, value in info.items():
+                    tag = ExifTags.TAGS.get(tag_id, tag_id)
+                    if tag == 'GPSInfo':
+                        gps_info = extract_gps_info(info)
+                        metadata.update(gps_info)
+                    else:
+                        metadata[tag] = value
+            return metadata
+    except Exception as e:
+        logging.error(f"Error al procesar la imagen {image_file_path}: {str(e)}")
+        return {'Error': str(e)}
+
+def extract_docx_metadata(docx_file_path: str) -> Dict[str, Any]:
+    """Extrae metadatos de un archivo DOCX."""
+    try:
+        doc = Document(docx_file_path)
+        core_props = doc.core_properties
+        metadata = {
+            'Autor': core_props.author,
+            'Título': core_props.title,
+            'Asunto': core_props.subject,
+            'Comentarios': core_props.comments,
+            'Categoría': core_props.category,
+            'Creador': getattr(core_props, 'creator', 'N/A'),
+            'Palabras clave': core_props.keywords,
+            'Último impreso': core_props.last_printed,
+            'Fecha de creación': core_props.created,
+            'Última modificación': core_props.modified
+        }
+        return {k: v for k, v in metadata.items() if v is not None and v != 'N/A'}
+    except PackageNotFoundError:
+        logging.error(f"El archivo {docx_file_path} no es un paquete DOCX válido.")
+        return {'Error': 'El archivo no es un paquete DOCX válido.'}
+    except Exception as e:
+        logging.error(f"Error al procesar el archivo DOCX {docx_file_path}: {str(e)}")
+        return {'Error': str(e)}
+
+def extract_audio_metadata(audio_file_path: str) -> Dict[str, Any]:
+    """Extrae metadatos de un archivo de audio."""
+    try:
+        audio = MutagenFile(audio_file_path)
+        if audio is None:
+            return {'Error': 'No se pudieron extraer los metadatos del archivo de audio.'}
+        metadata = {key: str(value) for key, value in audio.items()}
+        return metadata
+    except Exception as e:
+        logging.error(f"Error al procesar el archivo de audio {audio_file_path}: {str(e)}")
+        return {'Error': str(e)}
+
+def extract_video_metadata(video_file_path: str) -> Dict[str, Any]:
+    """Extrae metadatos de un archivo de vídeo."""
+    try:
+        media_info = MediaInfo.parse(video_file_path)
+        metadata = {}
+        for track in media_info.tracks:
+            for key, value in track.to_data().items():
+                if value:
+                    metadata[key] = value
+        return metadata
+    except Exception as e:
+        logging.error(f"Error al procesar el archivo de vídeo {video_file_path}: {str(e)}")
+        return {'Error': str(e)}
+
+def process_file(file_path: str, file_types: Dict[str, bool]) -> Dict[str, Any]:
+    """Procesa un archivo y extrae sus metadatos según su tipo."""
+    _, ext = os.path.splitext(file_path.lower())
+    if ext == '.pdf' and file_types.get('PDF', True):
+        return {'file_path': file_path, 'metadata': extract_pdf_metadata(file_path)}
+    elif ext in ('.png', '.jpg', '.jpeg', '.tiff', '.bmp') and file_types.get('Images', True):
+        return {'file_path': file_path, 'metadata': extract_image_metadata(file_path)}
+    elif ext == '.docx' and file_types.get('DOCX', True):
+        return {'file_path': file_path, 'metadata': extract_docx_metadata(file_path)}
+    elif ext in ('.mp3', '.flac', '.wav', '.aac') and file_types.get('Audio', True):
+        return {'file_path': file_path, 'metadata': extract_audio_metadata(file_path)}
+    elif ext in ('.mp4', '.mkv', '.avi', '.mov') and file_types.get('Video', True):
+        return {'file_path': file_path, 'metadata': extract_video_metadata(file_path)}
+    return {}
+
+def analyze_directory(directory_path: str, log_widget, progress_bar, file_types: Dict[str, bool]) -> List[Dict[str, Any]]:
+    """Analiza un directorio y extrae metadatos de los archivos soportados."""
+    results = []
+    files = [os.path.join(root, file) for root, _, files in os.walk(directory_path) for file in files]
+    total_files = len(files)
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_file = {executor.submit(process_file, file, file_types): file for file in files}
+        
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_file)):
+            result = future.result()
+            if result:
+                results.append(result)
+            progress = (i + 1) / total_files * 100
+            progress_bar['value'] = progress
+            log_widget.insert(tk.END, f"Procesado: {future_to_file[future]}\n")
+            log_widget.update()
+            
+    return results
+
+def generate_html_report(results: List[Dict[str, Any]], output_path: str = 'informe_metadatos.html'):
+    """Genera un informe HTML con los metadatos extraídos."""
+    html_template = r"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Informe de Metadatos</title>
+        <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+        <style>
+            body { font-family: 'Roboto', sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
+            h1 { text-align: center; color: #4CAF50; }
+            pre { text-align: center; font-family: monospace; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .file { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+            .file h2 { margin-top: 0; color: #333; }
+            .metadata { margin-left: 20px; }
+            .metadata p { margin: 5px 0; }
+            .metadata p strong { color: #555; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <pre>
+  __  __      _        _____            _             
+ |  \/  |    | |      |  __ \          | |            
+ | \  / | ___| |_ __ _| |__) |___  __ _| | __ _ _ __  
+ | |\/| |/ _ \ __/ _` |  _  // _ \/ _` | |/ _` | '_ \ 
+ | |  | |  __/ || (_| | | \ \  __/ (_| | | (_| | | | |
+ |_|  |_|\___|\__\__,_|_|  \_\___|\__, |_|\__,_|_| |_|
+                                    __/ |             
+                                   |___/              
+            </pre>
+            <h1>MetaRadar</h1>
+            {% for result in results %}
+            <div class="file">
+                <h2>Archivo: {{ result.file_path }}</h2>
+                <div class="metadata">
+                    {% for key, value in result.metadata.items() %}
+                    <p><strong>{{ key }}:</strong> {{ value }}</p>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+            <footer>
+                <p style="text-align: center; margin-top: 20px;">Generado por omrpps</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    env = Environment(loader=BaseLoader)
+    template = env.from_string(html_template)
+    html_content = template.render(results=results)
+    with open(output_path, 'w', encoding='utf-8') as file:
+        file.write(html_content)
+    logging.info(f"Informe generado: {output_path}")
+
+def show_initial_title():
+    """Muestra el título inicial en una ventana de diálogo."""
+    title = r"""
+  __  __      _        _____            _             
+ |  \/  |    | |      |  __ \          | |            
+ | \  / | ___| |_ __ _| |__) |___  __ _| | __ _ _ __  
+ | |\/| |/ _ \ __/ _` |  _  // _ \/ _` | |/ _` | '_ \ 
+ | |  | |  __/ || (_| | | \ \  __/ (_| | | (_| | | | |
+ |_|  |_|\___|\__\__,_|_|  \_\___|\__, |_|\__,_|_| |_|
+                                    __/ |             
+                                   |___/              
+    """
+    messagebox.showinfo("MetaRadar", title)
+
+def run_analysis(directory_path: str, log_widget, progress_bar, file_types: Dict[str, bool]):
+    """Ejecuta el análisis de metadatos y actualiza el log_widget con el progreso."""
+    log_widget.insert(tk.END, f"Analizando directorio: {directory_path}\n")
+    log_widget.update()
+    results = analyze_directory(directory_path, log_widget, progress_bar, file_types)
+    generate_html_report(results)
+    log_widget.insert(tk.END, "Análisis completado. Informe generado: informe_metadatos.html\n")
+    log_widget.update()
+
+def start_analysis(log_widget, progress_bar, file_types: Dict[str, bool]):
+    """Inicia el análisis tras seleccionar un directorio."""
+    directory_path = filedialog.askdirectory(title="Selecciona un directorio para analizar")
+    if directory_path:
+        run_analysis(directory_path, log_widget, progress_bar, file_types)
+    else:
+        log_widget.insert(tk.END, "No se seleccionó ningún directorio.\n")
+        log_widget.update()
+
+def open_report():
+    """Abre el informe generado en el navegador predeterminado."""
+    report_path = 'informe_metadatos.html'
+    if os.path.exists(report_path):
+        webbrowser.open(report_path)
+    else:
+        messagebox.showerror("Error", "El informe no se ha encontrado. Por favor, realiza el análisis primero.")
+
+def open_settings_window(root, file_types: Dict[str, bool]):
+    """Abre una ventana de configuración para seleccionar los tipos de archivos a analizar."""
+    settings_window = tk.Toplevel(root)
+    settings_window.title("Configuración de Análisis")
+    settings_window.geometry("300x300")
+
+    tk.Label(settings_window, text="Selecciona los tipos de archivos a analizar:").pack(pady=10)
+
+    pdf_var = tk.BooleanVar(value=file_types['PDF'])
+    tk.Checkbutton(settings_window, text="PDF", variable=pdf_var).pack(anchor='w', padx=20)
+    
+    images_var = tk.BooleanVar(value=file_types['Images'])
+    tk.Checkbutton(settings_window, text="Imágenes (PNG, JPEG, TIFF, BMP)", variable=images_var).pack(anchor='w', padx=20)
+    
+    docx_var = tk.BooleanVar(value=file_types['DOCX'])
+    tk.Checkbutton(settings_window, text="Documentos DOCX", variable=docx_var).pack(anchor='w', padx=20)
+
+    audio_var = tk.BooleanVar(value=file_types['Audio'])
+    tk.Checkbutton(settings_window, text="Audio (MP3, FLAC, WAV, AAC)", variable=audio_var).pack(anchor='w', padx=20)
+
+    video_var = tk.BooleanVar(value=file_types['Video'])
+    tk.Checkbutton(settings_window, text="Vídeo (MP4, MKV, AVI, MOV)", variable=video_var).pack(anchor='w', padx=20)
+
+    def save_settings():
+        file_types['PDF'] = pdf_var.get()
+        file_types['Images'] = images_var.get()
+        file_types['DOCX'] = docx_var.get()
+        file_types['Audio'] = audio_var.get()
+        file_types['Video'] = video_var.get()
+        settings_window.destroy()
+
+    tk.Button(settings_window, text="Guardar", command=save_settings).pack(pady=10)
+
+def main():
+    """Función principal para ejecutar el análisis de metadatos con GUI."""
+    root = tk.Tk()
+    root.title("MetaRadar")
+    file_types = {'PDF': True, 'Images': True, 'DOCX': True, 'Audio': True, 'Video': True}
+
+    # Mostrar el título inicial
+    show_initial_title()
+
+    # Configurar la ventana principal
+    root.geometry("600x450")
+
+    # Crear un widget de texto para mostrar los logs
+    log_widget = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=70, height=15)
+    log_widget.pack(pady=10)
+
+    # Crear una barra de progreso
+    progress_bar = ttk.Progressbar(root, orient='horizontal', mode='determinate', length=500)
+    progress_bar.pack(pady=10)
+
+    # Crear un botón para iniciar el análisis
+    analyze_button = tk.Button(root, text="Seleccionar Directorio y Analizar", command=lambda: start_analysis(log_widget, progress_bar, file_types))
+    analyze_button.pack(pady=5)
+
+    # Crear un botón para abrir el informe
+    open_report_button = tk.Button(root, text="Abrir Informe", command=open_report)
+    open_report_button.pack(pady=5)
+
+    # Crear un botón para abrir la configuración
+    settings_button = tk.Button(root, text="Configuración", command=lambda: open_settings_window(root, file_types))
+    settings_button.pack(pady=5)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
