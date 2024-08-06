@@ -1,0 +1,7 @@
+PyPDF2
+Pillow
+python-docx
+mutagen
+pymediainfo
+jinja2
+tk

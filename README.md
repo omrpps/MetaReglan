@@ -45,7 +45,7 @@ MetaReglan es una herramienta para extraer metadatos de diversos tipos de archiv
 ## Uso
 
 1. **Ejecuta el script principal:**
-   python main.py
+   python Metadatos.py
 2. **Uso de la interfac gráfica**
    Aparecerá una ventana de tkinter donde podrás seleccionar el directorio que deseas analizar.
    Configura las opciones de análisis desde el botón de configuración.
