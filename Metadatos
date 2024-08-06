@@ -227,7 +227,7 @@ def generate_html_report(results: List[Dict[str, Any]], output_path: str = 'info
                                     __/ |             
                                    |___/              
             </pre>
-            <h1>MetaRadar</h1>
+            <h1>MetaReglan</h1>
             {% for result in results %}
             <div class="file">
                 <h2>Archivo: {{ result.file_path }}</h2>
@@ -264,7 +264,7 @@ def show_initial_title():
                                     __/ |             
                                    |___/              
     """
-    messagebox.showinfo("MetaRadar", title)
+    messagebox.showinfo("MetaReglan", title)
 
 def run_analysis(directory_path: str, log_widget, progress_bar, file_types: Dict[str, bool]):
     """Ejecuta el análisis de metadatos y actualiza el log_widget con el progreso."""
@@ -328,7 +328,7 @@ def open_settings_window(root, file_types: Dict[str, bool]):
 def main():
     """Función principal para ejecutar el análisis de metadatos con GUI."""
     root = tk.Tk()
-    root.title("MetaRadar")
+    root.title("MetaReglan")
     file_types = {'PDF': True, 'Images': True, 'DOCX': True, 'Audio': True, 'Video': True}
 
     # Mostrar el título inicial
